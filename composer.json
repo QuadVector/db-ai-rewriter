@@ -1,0 +1,30 @@
+{
+    "name": "quadvector/db-ai-rewriter",
+    "description": "Database AI update CLI tool",
+    "type": "project",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "QuadVector\\DBAIRewriter\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "QuadVector",
+            "email": "info@quadvector.net"
+        }
+    ],
+    "minimum-stability": "stable",
+    "require": {
+        "league/climate": "^3.12",
+        "openai-php/client": "^0.20.1",
+        "symfony/http-client": "^8.1",
+        "nyholm/psr7": "^1.8",
+        "vlucas/phpdotenv": "^5.7"
+    },
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    }
+}
