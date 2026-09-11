@@ -2,11 +2,26 @@
 
 namespace QuadVector\DBAIRewriter\DataSource;
 
+use SQLite3;
+
 /**
  * Реализация интерфейса DataSourceInterface для работы с SQLite.
  */
 class SQLiteDataSource implements DataSourceInterface
 {
+	private SQLite3 $connection;
+
+	/**
+	 * Конструктор
+	 * 
+	 * @param string $dbPath Путь к файлу базы данных SQLite
+	 */
+	public function __construct(
+		string $dbPath
+	) {
+		$this->connection = new SQLite3($dbPath);
+	}
+
 	/**
 	 * Получить все записи из таблицы, соответствующие критериям.
 	 *
@@ -24,8 +39,31 @@ class SQLiteDataSource implements DataSourceInterface
 		?int $limit = null,
 		?int $offset = null
 	): iterable {
-		// @todo Реализация метода для SQLite
-		return [];
+		$query = "SELECT " . implode(", ", $columns) . " FROM " . $tableName;
+		if (!empty($criteria)) {
+			$query .= " WHERE " . implode(" AND ", array_map(fn($k) => "$k = :$k", array_keys($criteria)));
+		}
+		if ($limit !== null) {
+			$query .= " LIMIT " . $limit;
+		}
+		if ($offset !== null) {
+			$query .= " OFFSET " . $offset;
+		}
+
+		$stmt = $this->connection->prepare($query);
+
+		foreach ($criteria as $key => $value) {
+			$stmt->bindValue(":$key", $value);
+		}
+
+		$queryResult = $stmt->execute();
+
+		$result = [];
+		while ($row = $queryResult->fetchArray(SQLITE3_ASSOC)) {
+			$result[] = $row;
+		}
+
+		return $result;
 	}
 
 	/**
@@ -41,8 +79,22 @@ class SQLiteDataSource implements DataSourceInterface
 		array $criteria = [],
 		array $columns = ['*']
 	): ?array {
-		// @todo Реализация метода для SQLite
-		return null;
+		$query = "SELECT " . implode(", ", $columns) . " FROM " . $tableName;
+
+		if (!empty($criteria)) {
+			$query .= " WHERE " . implode(" AND ", array_map(fn($k) => "$k = :$k", array_keys($criteria)));
+		}
+
+		$stmt = $this->connection->prepare($query);
+
+		foreach ($criteria as $key => $value) {
+			$stmt->bindValue(":$key", $value);
+		}
+
+		$queryResult = $stmt->execute();
+
+		$row = $queryResult->fetchArray(SQLITE3_ASSOC);
+		return $row ?: null;
 	}
 
 	/**
@@ -54,8 +106,22 @@ class SQLiteDataSource implements DataSourceInterface
 	 */
 	public function count(string $tableName, array $criteria = []): int
 	{
-		// @todo Реализация метода для SQLite
-		return 0;
+		$query = "SELECT COUNT(*) as count FROM " . $tableName;
+
+		if (!empty($criteria)) {
+			$query .= " WHERE " . implode(" AND ", array_map(fn($k) => "$k = :$k", array_keys($criteria)));
+		}
+
+		$stmt = $this->connection->prepare($query);
+
+		foreach ($criteria as $key => $value) {
+			$stmt->bindValue(":$key", $value);
+		}
+
+		$queryResult = $stmt->execute();
+
+		$row = $queryResult->fetchArray(SQLITE3_ASSOC);
+		return $row ? (int)$row['count'] : 0;
 	}
 
 	/**
@@ -67,8 +133,17 @@ class SQLiteDataSource implements DataSourceInterface
 	 */
 	public function insert(string $tableName, array $data): string|int
 	{
-		// @todo Реализация метода для SQLite
-		return 0;
+		$columns = array_keys($data);
+
+		$query = "INSERT INTO " . $tableName . " (" . implode(", ", $columns) . ") VALUES (" . implode(", ", array_map(fn($c) => ":$c", $columns)) . ")";
+		$stmt = $this->connection->prepare($query);
+
+		foreach ($data as $key => $value) {
+			$stmt->bindValue(":$key", $value);
+		}
+		$stmt->execute();
+
+		return $this->connection->lastInsertRowID();
 	}
 
 	/**
@@ -84,8 +159,27 @@ class SQLiteDataSource implements DataSourceInterface
 		array $data,
 		array $criteria
 	): int {
-		// @todo Реализация метода для SQLite
-		return 0;
+		$query = "UPDATE " . $tableName;
+		if (!empty($data)) {
+			$query .= " SET " . implode(", ", array_map(fn($k) => "$k = :$k", array_keys($data)));
+		}
+
+		if (!empty($criteria)) {
+			$query .= " WHERE " . implode(" AND ", array_map(fn($k) => "$k = :$k", array_keys($criteria)));
+		}
+
+		$stmt = $this->connection->prepare($query);
+
+		foreach ($data as $key => $value) {
+			$stmt->bindValue(":$key", $value);
+		}
+
+		foreach ($criteria as $key => $value) {
+			$stmt->bindValue(":$key", $value);
+		}
+
+		$stmt->execute();
+		return $this->connection->changes();
 	}
 
 	/**
@@ -97,8 +191,19 @@ class SQLiteDataSource implements DataSourceInterface
 	 */
 	public function delete(string $tableName, array $criteria): int
 	{
-		// @todo Реализация метода для SQLite
-		return 0;
+		$query = "DELETE FROM " . $tableName;
+
+		if (!empty($criteria)) {
+			$query .= " WHERE " . implode(" AND ", array_map(fn($k) => "$k = :$k", array_keys($criteria)));
+		}
+
+		$stmt = $this->connection->prepare($query);
+		foreach ($criteria as $key => $value) {
+			$stmt->bindValue(":$key", $value);
+		}
+		$stmt->execute();
+
+		return $this->connection->changes();
 	}
 
 	/**
@@ -110,7 +215,13 @@ class SQLiteDataSource implements DataSourceInterface
 	 */
 	public function query(string $sql, array $params = []): iterable
 	{
-		// @todo Реализация метода для SQLite
-		return [];
+		$query = $this->connection->prepare($sql);
+		foreach ($params as $key => $value) {
+			$query->bindValue(":$key", $value);
+		}
+		$result = $query->execute();
+		while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+			yield $row;
+		}
 	}
 }
