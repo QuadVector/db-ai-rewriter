@@ -25,6 +25,16 @@ class OpenAILLMGenerator implements LLMGeneratorInterface
 	) {}
 
 	/**
+	 * Возвращает настройки прокси.
+	 *
+	 * @return Proxy[]|null
+	 */
+	public function getProxy(): ?array
+	{
+		return $this->proxy;
+	}
+
+	/**
 	 * Отправляет исходный текст в LLM и возвращает сгенерированный текст.
 	 * 
 	 * @param string $input Исходный текст для генерации.

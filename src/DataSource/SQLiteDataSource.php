@@ -58,12 +58,9 @@ class SQLiteDataSource implements DataSourceInterface
 
 		$queryResult = $stmt->execute();
 
-		$result = [];
 		while ($row = $queryResult->fetchArray(SQLITE3_ASSOC)) {
-			$result[] = $row;
+			yield $row;
 		}
-
-		return $result;
 	}
 
 	/**

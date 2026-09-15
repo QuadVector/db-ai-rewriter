@@ -2,11 +2,33 @@
 
 namespace QuadVector\DBAIRewriter\LLMGenerator;
 
+use QuadVector\DBAIRewriter\ValueObject\Proxy;
+
 /**
  * Интерфейс для объектов, способных генерировать текст с использованием LLM.
  */
 interface LLMGeneratorInterface
 {
+	/**
+	 * Конструктор
+	 * 
+	 * @param string $apiKey Ключ API для доступа к OpenAI.
+	 * @param string $projectID Идентификатор проекта OpenAI.
+	 * @param Proxy[]|null $proxy Настройки прокси (необязательно).
+	 */
+	public function __construct(
+		string $apiKey,
+		string $projectID,
+		?array $proxy = null
+	);
+
+	/**
+	 * Возвращает настройки прокси.
+	 *
+	 * @return Proxy[]|null
+	 */
+	public function getProxy(): ?array;
+
 	/**
 	 * Отправляет исходный текст в LLM и возвращает сгенерированный текст.
 	 * 
