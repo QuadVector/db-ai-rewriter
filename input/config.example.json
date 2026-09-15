@@ -1,0 +1,15 @@
+{
+	"data_source": "sqlite",
+	"db_name": "db.sqlite3",
+	"db_username": "",
+	"db_pass": "",
+	"table_name": "table",
+	"ai_provider": "openai",
+	"ai_model": "gpt-5.4-nano",
+	"ai_temperature": 1.0,
+	"ai_max_output_tokens": 8000,
+	"ai_batch": true,
+	"id_column_name": "id",
+	"update_column_name": "content",
+	"update_column_prompt": "Please rewrite the following text to improve clarity and conciseness.\nSource text:\n{{content}}"
+}
