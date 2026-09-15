@@ -2,7 +2,7 @@ composer.phar
 /vendor/
 /input/
 /input/*
-!/input/config.json
+!/input/config.example.json
 /output/
 .env
 
