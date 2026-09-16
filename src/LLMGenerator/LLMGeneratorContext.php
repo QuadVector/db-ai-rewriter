@@ -2,40 +2,86 @@
 
 namespace QuadVector\DBAIRewriter\LLMGenerator;
 
+use LogicException;
+use QuadVector\DBAIRewriter\ValueObject\Proxy;
+
 /**
- * Контекст для работы с объектом, реализующим интерфейс LLMGeneratorInterface.
+ * Контекст выбранной стратегии генерации.
  */
-class LLMGeneratorContext
+final class LLMGeneratorContext
 {
-	/**
-	 * Конструктор
-	 * @param \QuadVector\DBAIRewriter\LLMGenerator\LLMGeneratorInterface $generator Экземпляр генератора текста.
-	 */
 	public function __construct(
-		private \QuadVector\DBAIRewriter\LLMGenerator\LLMGeneratorInterface $generator
+		private LLMGeneratorInterface $generator
 	) {}
 
-	/**
-	 * Получает экземпляр генератора текста.
-	 * @return \QuadVector\DBAIRewriter\LLMGenerator\LLMGeneratorInterface
-	 */
-	public function getGenerator(): \QuadVector\DBAIRewriter\LLMGenerator\LLMGeneratorInterface
+	public function getGenerator(): LLMGeneratorInterface
 	{
 		return $this->generator;
 	}
 
 	/**
-	 * Отправляет исходный текст в LLM и возвращает сгенерированный текст.
-	 * 
-	 * @param string $input Исходный текст для генерации.
-	 * @param ?string $model Модель LLM для использования.
-	 * @param float $temperature Температура генерации текста.
-	 * @param int $maxOutputTokens Максимальное количество токенов в выходном тексте.
-	 *
-	 * @return string
+	 * @return Proxy[]|null
 	 */
-	public function rewrite(string $input, ?string $model = null, float $temperature = 1.0, int $maxOutputTokens = 8000): string
+	public function getProxy(): ?array
 	{
-		return $this->getGenerator()->rewrite($input, $model, $temperature, $maxOutputTokens);
+		return $this->generator->getProxy();
+	}
+
+	public function rewrite(
+		string $input,
+		?string $model = null,
+		float $temperature = 1.0,
+		int $maxOutputTokens = 8000
+	): string {
+		return $this->generator->rewrite(
+			$input,
+			$model,
+			$temperature,
+			$maxOutputTokens
+		);
+	}
+
+	public function supportsBatch(): bool
+	{
+		return $this->generator instanceof BatchLLMGeneratorInterface;
+	}
+
+	/**
+	 * @param iterable<array{id: int|string, input: string}> $requests
+	 * @param callable(array<string, mixed>): void $onResult
+	 * @param int $maxWaitSeconds 0 означает ожидание без ограничения времени.
+	 *
+	 * @return array<string, mixed>
+	 */
+	public function rewriteBatch(
+		iterable $requests,
+		callable $onResult,
+		string $stateDirectory,
+		bool $force = false,
+		?string $model = null,
+		float $temperature = 1.0,
+		int $maxOutputTokens = 8000,
+		int $pollIntervalSeconds = 60,
+		int $maxWaitSeconds = 0,
+		array $options = []
+	): array {
+		if (!$this->generator instanceof BatchLLMGeneratorInterface) {
+			throw new LogicException(
+				'The selected LLM strategy does not support Batch processing.'
+			);
+		}
+
+		return $this->generator->rewriteBatch(
+			$requests,
+			$onResult,
+			$stateDirectory,
+			$force,
+			$model,
+			$temperature,
+			$maxOutputTokens,
+			$pollIntervalSeconds,
+			$maxWaitSeconds,
+			$options
+		);
 	}
 }

@@ -3,126 +3,132 @@
 set_time_limit(0);
 error_reporting(E_ERROR | E_PARSE);
 
-require_once("vendor/autoload.php");
+require_once __DIR__ . DIRECTORY_SEPARATOR . 'vendor' . DIRECTORY_SEPARATOR . 'autoload.php';
 
-use QuadVector\DBAIRewriter\ValueObject\Proxy;
-use QuadVector\DBAIRewriter\Helper\Text;
 use QuadVector\DBAIRewriter\DBAIRewriter;
 use QuadVector\DBAIRewriter\DBAIRewriterConfig;
+use QuadVector\DBAIRewriter\DataSource\SQLiteDataSource;
+use QuadVector\DBAIRewriter\LLMGenerator\OpenAILLMGenerator;
+use QuadVector\DBAIRewriter\ValueObject\Proxy;
 
-$dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
-$dotenv->safeLoad();
-
-// обработка входных параметров
-$inputOptions = getopt("", [
-	"proxy:",
-	"logs",
-	"batch",
-	"force-batch",
-]);
-
-$showLogs = isset($inputOptions["logs"]); // выводить логи
-$batchMode = isset($inputOptions["batch"]); // массовая обработка
-$forceBatch = isset($inputOptions["force-batch"]); // принудительная массовая обработка (удаление предыдущих данных)
-
-// прокси
-$proxy = [];
-
-if (Text::cliOptionPassed($argv, "proxy")) {
-	$proxyRaw = $inputOptions["proxy"] ?? "";
-
-	if (
-		$proxyRaw !== false
-		&& trim((string)$proxyRaw) !== ""
-	) {
-		$proxy = explode(',', (string)$proxyRaw);
-		$proxy = array_map('trim', $proxy);
-
-		$proxy = array_filter(
-			$proxy,
-			function (string $url): bool {
-				return $url !== '';
-			}
-		);
-
-		$proxy = array_values($proxy);
+/**
+ * Разбирает список прокси из --proxy или PROXY.
+ * Поддерживаются оба разделителя: запятая и точка с запятой.
+ *
+ * @return string[]
+ */
+function parseProxyList(mixed $value): array
+{
+	if ($value === false || $value === null || trim((string) $value) === '') {
+		return [];
 	}
-} elseif (isset($_ENV["PROXY"])) {
-	$proxyRaw = $_ENV["PROXY"];
 
-	if (
-		$proxyRaw !== false
-		&& trim((string)$proxyRaw) !== ""
-	) {
-		$proxy = explode(
-			";",
-			trim((string)$proxyRaw, ';')
-		);
+	$items = preg_split('/[;,]+/', trim((string) $value, " \t\n\r\0\x0B;,")) ?: [];
+	$items = array_map('trim', $items);
 
-		$proxy = array_map('trim', $proxy);
+	return array_values(array_filter(
+		$items,
+		static fn(string $url): bool => $url !== ''
+	));
+}
 
-		$proxy = array_filter(
-			$proxy,
-			function (string $url): bool {
-				return $url !== '';
-			}
-		);
+try {
+	$dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
+	$dotenv->safeLoad();
 
-		$proxy = array_values($proxy);
+	$inputOptions = getopt('', [
+		'proxy:',
+		'logs',
+		'force-batch',
+	]);
+
+	if ($inputOptions === false) {
+		throw new RuntimeException('Failed to parse command-line options.');
 	}
+
+	$showLogs = isset($inputOptions['logs']);
+	$forceBatch = isset($inputOptions['force-batch']);
+
+	// Переданный --proxy имеет приоритет над PROXY из .env.
+	$proxyValues = array_key_exists('proxy', $inputOptions)
+		? parseProxyList($inputOptions['proxy'])
+		: parseProxyList($_ENV['PROXY'] ?? null);
+
+	/** @var Proxy[] $proxies */
+	$proxies = array_map(
+		static fn(string $value): Proxy => Proxy::fromString($value),
+		$proxyValues
+	);
+
+	$inputDir = __DIR__ . DIRECTORY_SEPARATOR . 'input';
+	if (!is_dir($inputDir)) {
+		throw new RuntimeException('Input directory not found.');
+	}
+
+	$inputConfigFile = $inputDir . DIRECTORY_SEPARATOR . 'config.json';
+	if (!is_file($inputConfigFile)) {
+		throw new RuntimeException('Input config file not found.');
+	}
+
+	$inputConfigJson = file_get_contents($inputConfigFile);
+	if ($inputConfigJson === false) {
+		throw new RuntimeException('Failed to read input config file.');
+	}
+
+	$inputConfig = json_decode(
+		$inputConfigJson,
+		true,
+		512,
+		JSON_THROW_ON_ERROR
+	);
+
+	if (!is_array($inputConfig)) {
+		throw new RuntimeException('Input config must contain a JSON object.');
+	}
+
+	$dataSourceName = $inputConfig['data_source'] ?? null;
+	$dataSource = match ($dataSourceName) {
+		'sqlite' => new SQLiteDataSource(
+			$inputDir
+				. DIRECTORY_SEPARATOR
+				. (string) ($inputConfig['db_name'] ?? '')
+		),
+		default => throw new InvalidArgumentException(
+			"Unsupported data source: " . (is_scalar($dataSourceName) ? (string) $dataSourceName : 'unknown')
+		),
+	};
+
+	$aiProvider = $inputConfig['ai_provider'] ?? null;
+	$openAIKey = trim((string) ($_ENV['OPENAI_KEY'] ?? ''));
+	$openAIProjectId = trim((string) ($_ENV['OPENAI_PROJECT_ID'] ?? ''));
+
+	if ($aiProvider === 'openai' && $openAIKey === '') {
+		throw new RuntimeException('OPENAI_KEY is not set in .env.');
+	}
+
+	$llmGenerator = match ($aiProvider) {
+		'openai' => new OpenAILLMGenerator(
+			apiKey: $openAIKey,
+			projectID: $openAIProjectId,
+			proxy: $proxies,
+		),
+		default => throw new InvalidArgumentException(
+			"Unsupported AI provider: " . (is_scalar($aiProvider) ? (string) $aiProvider : 'unknown')
+		),
+	};
+
+	$dbAIRewriter = new DBAIRewriter(
+		new DBAIRewriterConfig(
+			inputConfig: $inputConfig,
+			showLogs: $showLogs,
+			forceBatch: $forceBatch,
+		),
+		$dataSource,
+		$llmGenerator
+	);
+
+	$dbAIRewriter->run();
+} catch (Throwable $exception) {
+	fwrite(STDERR, 'Error: ' . $exception->getMessage() . PHP_EOL);
+	exit(1);
 }
-
-// инициализируем объекты прокси для дальнейшего использования в приложении
-$proxy = array_map(
-	function (string $item) {
-		return Proxy::fromString($item);
-	},
-	$proxy
-);
-
-// открываем папку input для получения входных данных
-$inputDir = __DIR__ .  DIRECTORY_SEPARATOR .  "input";
-if (!is_dir($inputDir)) {
-	die("Input directory not found.");
-}
-
-$inputConfigFile = $inputDir .  DIRECTORY_SEPARATOR .  "config.json";
-if (file_exists($inputConfigFile) === false) {
-	die("Input config file not found.");
-}
-
-// читаем конфигурацию из файла JSON
-$inputConfig = json_decode(file_get_contents($inputConfigFile), true);
-if ($inputConfig === null) {
-	die("Failed to parse input config file.");
-}
-
-// определяем источник данных и генератор LLM на основе конфигурации
-$dataSource = match ($inputConfig['data_source']) {
-	'sqlite' => new QuadVector\DBAIRewriter\DataSource\SQLiteDataSource(
-		$inputDir . DIRECTORY_SEPARATOR . $inputConfig['db_name']
-	),
-	default => throw new InvalidArgumentException('Unsupported data source'),
-};
-
-$llmGenerator = match ($inputConfig['ai_provider']) {
-	'openai' => new QuadVector\DBAIRewriter\LLMGenerator\OpenAILLMGenerator(
-		$_ENV['OPENAI_KEY'],
-		$_ENV['OPENAI_PROJECT_ID'] ?? '',
-		$proxy,
-	),
-	default => throw new InvalidArgumentException('Unsupported AI provider'),
-};
-
-// инициализация главного объекта генератора
-$DBAIRewriter = new DBAIRewriter(
-	new DBAIRewriterConfig(
-		inputConfig: $inputConfig,
-		showLogs: $showLogs,
-		forceBatch: $forceBatch
-	),
-	$dataSource,
-	$llmGenerator
-);
-
-$DBAIRewriter->run();

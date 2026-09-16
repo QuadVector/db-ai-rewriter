@@ -3,11 +3,10 @@
 namespace QuadVector\DBAIRewriter;
 
 /**
- * Конструктор
+ * Конфигурация запуска DBAIRewriter.
  *
- * @param array $inputConfig Входная json конфигурация
- * @param bool $showLogs Выводить логи
- * @param bool $forceBatch Принудительная массовая обработка (удаление предыдущих данных)
+ * Batch-режим читается из input/config.json, а принудительный сброс
+ * Batch-состояния включается консольным параметром --force-batch.
  */
 final class DBAIRewriterConfig
 {
