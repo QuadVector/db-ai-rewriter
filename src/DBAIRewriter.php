@@ -220,7 +220,13 @@ class DBAIRewriter
 			'empty' => 0,
 			'processed' => 0,
 		];
-		$resultStats = ['success' => 0, 'failed' => 0, 'skipped' => 0];
+		$resultStats = [
+			'success' => 0,
+			'failed' => 0,
+			'failed_attempts' => 0,
+			'skipped' => 0,
+		];
+		$failedResultIds = [];
 		$changesSinceSave = 0;
 		$fatalError = null;
 		$batchStats = [];
@@ -248,17 +254,23 @@ class DBAIRewriter
 			$fileMapPath,
 			&$mapById,
 			&$resultStats,
+			&$failedResultIds,
 			&$changesSinceSave
-		): void {
+		): bool {
 			$rowId = $result['id'] ?? null;
 			if (!is_int($rowId) && !is_string($rowId)) {
 				$resultStats['failed']++;
-				return;
+				$resultStats['failed_attempts']++;
+				$this->printRowError(null, 'Batch result does not contain a valid row ID.');
+
+				// Результат обработан и учтён как ошибка, поэтому сам Batch не должен стать failed.
+				return true;
 			}
 
-			if (($mapById[(string) $rowId]['status'] ?? null) === 'success') {
+			$rowIdKey = (string) $rowId;
+			if (($mapById[$rowIdKey]['status'] ?? null) === 'success') {
 				$resultStats['skipped']++;
-				return;
+				return true;
 			}
 
 			try {
@@ -284,12 +296,16 @@ class DBAIRewriter
 				}
 
 				$resultStats['success']++;
+				unset($failedResultIds[$rowIdKey]);
+				$resultStats['failed'] = count($failedResultIds);
 				$this->setProcessingMapEntry($mapById, $rowId, [
 					'status' => 'success',
 					'mode' => 'batch',
 				]);
 			} catch (Throwable $exception) {
-				$resultStats['failed']++;
+				$failedResultIds[$rowIdKey] = true;
+				$resultStats['failed'] = count($failedResultIds);
+				$resultStats['failed_attempts']++;
 				$error = $this->normalizeErrorMessage($exception->getMessage());
 				$this->setProcessingMapEntry($mapById, $rowId, [
 					'status' => 'failed',
@@ -297,10 +313,16 @@ class DBAIRewriter
 					'error' => $error,
 				]);
 				$this->printRowError($rowId, $error);
+				$this->saveProcessingMap($fileMapPath, $mapById);
+				$changesSinceSave = 0;
 			}
 
 			$changesSinceSave++;
 			$this->saveProcessingMapPeriodically($fileMapPath, $mapById, $changesSinceSave);
+
+			// Ошибка строки уже сохранена в карте и статистике. Для Batch-стратегии
+			// результат считается обработанным, чтобы завершённый chunk получил status=saved.
+			return true;
 		};
 
 		try {
@@ -584,6 +606,10 @@ class DBAIRewriter
 		$this->cli->output('<bold><yellow>Batches still waiting:</yellow></bold> ' . ($batchStats['waiting'] ?? 0));
 		$this->cli->output("<bold><green>Successful DB updates:</green></bold> {$resultStats['success']}");
 		$this->cli->output("<bold><red>Failed results:</red></bold> {$resultStats['failed']}");
+		$this->cli->output(
+			'<bold><yellow>Failed attempts logged:</yellow></bold> '
+				. (int) ($resultStats['failed_attempts'] ?? 0)
+		);
 		$this->cli->output("<bold><yellow>Results already applied:</yellow></bold> {$resultStats['skipped']}");
 
 		foreach ($batchStatuses as $status => $count) {
@@ -626,7 +652,14 @@ class DBAIRewriter
 				break;
 
 			case 'previous_session_saved':
-				$this->cli->output('<yellow>Previous Batch session is fully saved. Building a new session.</yellow>');
+				$this->cli->output(
+					'<yellow>Previous Batch session is fully saved, but new rows exist. Building a new session.</yellow>'
+				);
+				break;
+
+			case 'session_already_complete':
+				$this->cli->output('<bold><green>Batch session is already fully processed.</green></bold>');
+				$this->cli->output('<green>No new rows require processing. Existing Batch state is preserved.</green>');
 				break;
 
 			case 'session_resumed':
@@ -726,9 +759,11 @@ class DBAIRewriter
 				break;
 
 			case 'poll_iteration_started':
-				$this->cli->output(
-					'<bold><cyan>Collect iteration:</cyan></bold> ' . (int) ($context['iteration'] ?? 0)
-				);
+				if ($this->config->showLogs) {
+					$this->cli->output(
+						'<bold><cyan>Collect iteration:</cyan></bold> ' . (int) ($context['iteration'] ?? 0)
+					);
+				}
 				break;
 
 			case 'chunk_status':
@@ -761,10 +796,12 @@ class DBAIRewriter
 				break;
 
 			case 'chunk_remote_status':
-				$this->cli->output(
-					"<dim>[{$chunk}]</dim> OpenAI status: "
-						. $this->formatBatchStatus((string) ($context['status'] ?? 'unknown'))
-				);
+				if ($this->config->showLogs) {
+					$this->cli->output(
+						"<dim>[{$chunk}]</dim> OpenAI status: "
+							. $this->formatBatchStatus((string) ($context['status'] ?? 'unknown'))
+					);
+				}
 				break;
 
 			case 'chunk_completed':
@@ -776,6 +813,15 @@ class DBAIRewriter
 					"<green>{$chunk} saved:</green> "
 						. '<green>' . (int) ($context['success'] ?? 0) . ' successful</green>, '
 						. '<red>' . (int) ($context['failed'] ?? 0) . ' failed</red>'
+				);
+				break;
+
+			case 'chunk_results_incomplete':
+				$this->cli->output(
+					"<yellow>{$chunk} is incomplete:</yellow> "
+						. '<green>' . (int) ($context['success'] ?? 0) . ' applied</green>, '
+						. '<red>' . (int) ($context['failed'] ?? 0)
+						. ' written to the map as failed; restart the script to retry</red>'
 				);
 				break;
 
@@ -809,14 +855,20 @@ class DBAIRewriter
 				break;
 
 			case 'poll_iteration_finished':
-				$this->cli->output('<bold><cyan>Collect status:</cyan></bold>');
-				foreach (($context['statuses'] ?? []) as $status => $count) {
-					$this->cli->output(
-						'<bold>' . $this->formatBatchStatus((string) $status) . ' batches:</bold> ' . (int) $count
-					);
+				$statuses = is_array($context['statuses'] ?? null)
+					? $context['statuses']
+					: [];
+				$savedBatches = (int) ($statuses['saved'] ?? 0);
+				$waitingBatches = 0;
+				foreach (['submitted', 'validating', 'in_progress', 'finalizing', 'cancelling'] as $status) {
+					$waitingBatches += (int) ($statuses[$status] ?? 0);
 				}
-				$this->cli->output('<bold><green>Total saved results:</green></bold> ' . (int) ($context['saved_results'] ?? 0));
-				$this->cli->output('<bold><red>Total failed results:</red></bold> ' . (int) ($context['failed_results'] ?? 0));
+
+				$this->cli->output('<bold><cyan>Collect status:</cyan></bold>');
+				$this->cli->output("<bold><green>Saved batches:</green></bold> {$savedBatches}");
+				$this->cli->output("<bold><yellow>Waiting batches:</yellow></bold> {$waitingBatches}");
+				$this->cli->output('<bold><green>Total applied results:</green></bold> ' . (int) ($context['saved_results'] ?? 0));
+				$this->cli->output('<bold><red>Results requiring retry:</red></bold> ' . (int) ($context['failed_results'] ?? 0));
 				$this->cli->br();
 				break;
 
@@ -828,7 +880,7 @@ class DBAIRewriter
 				break;
 
 			case 'all_batches_collected':
-				$this->cli->output('<bold><green>All available batches collected.</green></bold>');
+				$this->cli->output('<bold><green>Current collect pass finished.</green></bold>');
 				break;
 
 			case 'max_wait_reached':

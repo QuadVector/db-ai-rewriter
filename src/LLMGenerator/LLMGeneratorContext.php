@@ -48,7 +48,7 @@ final class LLMGeneratorContext
 
 	/**
 	 * @param iterable<array{id: int|string, input: string}> $requests
-	 * @param callable(array<string, mixed>): void $onResult
+	 * @param callable(array<string, mixed>): bool $onResult
 	 * @param int $maxWaitSeconds 0 означает ожидание без ограничения времени.
 	 *
 	 * @return array<string, mixed>

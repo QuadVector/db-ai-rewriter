@@ -68,7 +68,7 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 	 * JSONL -> Files API -> Batches API -> polling -> результаты.
 	 *
 	 * @param iterable<array{id: int|string, input: string}> $requests
-	 * @param callable(array<string, mixed>): void $onResult
+	 * @param callable(array<string, mixed>): bool $onResult
 	 * @param int $maxWaitSeconds 0 означает ожидание без ограничения времени.
 	 *
 	 * @return array<string, mixed>
@@ -111,17 +111,24 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 		if (!isset($status['batches']) || !is_array($status['batches'])) {
 			throw new RuntimeException(
 				'Batch state is inconsistent: status.json does not contain a valid batches map. '
-				. 'Run the command with --force-batch to discard the broken local Batch state.'
+					. 'Run the command with --force-batch to discard the broken local Batch state.'
 			);
 		}
 
 		$hasStoredBatches = $status['batches'] !== [];
+		$completedSessionWithoutNewRequests = false;
 		if ($hasStoredBatches && $this->areAllBatchesSaved($status)) {
-			$this->emitBatchEvent('previous_session_saved');
-			$this->clearStateDirectory($stateDirectory);
-			$status = $this->emptyBatchStatus();
-			$requestMap = [];
-			$hasStoredBatches = false;
+			[$hasNewRequests, $requests] = $this->peekIterable($requests);
+
+			if ($hasNewRequests) {
+				$this->emitBatchEvent('previous_session_saved');
+				$this->clearStateDirectory($stateDirectory);
+				$status = $this->emptyBatchStatus();
+				$requestMap = [];
+				$hasStoredBatches = false;
+			} else {
+				$completedSessionWithoutNewRequests = true;
+			}
 		} elseif ($hasStoredBatches) {
 			$this->assertReusableBatchState($stateDirectory, $status, $requestMap);
 		}
@@ -135,9 +142,23 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 			'upload_failed' => 0,
 			'success' => 0,
 			'failed' => 0,
+			'failed_batches' => 0,
 			'waiting' => 0,
+			'iterations' => 0,
 			'batch_statuses' => [],
 		];
+
+		if ($completedSessionWithoutNewRequests) {
+			$stats['resumed'] = true;
+			$stats['batch_statuses'] = $this->countBatchStatuses($status);
+			$this->emitBatchEvent('session_already_complete', [
+				'queued' => $stats['queued'],
+				'chunks' => $stats['chunks'],
+			]);
+			$this->emitBatchEvent('batch_finished', $stats);
+
+			return $stats;
+		}
 
 		if (!$hasStoredBatches) {
 			$this->emitBatchEvent('build_started');
@@ -168,10 +189,13 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 			return $stats;
 		}
 
+		$pollIntervalSeconds = max(1, $pollIntervalSeconds);
+		$maxWaitSeconds = max(0, $maxWaitSeconds);
+
 		$submitStats = $this->submitBatchesUntilAccepted(
 			$stateDirectory,
 			$status,
-			max(1, $pollIntervalSeconds)
+			$pollIntervalSeconds
 		);
 		$stats['submitted'] = $submitStats['submitted'];
 		$stats['submit_skipped'] = $submitStats['skipped'];
@@ -182,11 +206,17 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 			$status,
 			$requestMap,
 			$onResult,
-			max(1, $pollIntervalSeconds),
-			max(0, $maxWaitSeconds)
+			$pollIntervalSeconds,
+			$maxWaitSeconds
 		);
 
-		$stats = array_replace($stats, $collectStats);
+		$stats['success'] = (int) ($collectStats['success'] ?? 0);
+		$stats['failed'] = (int) ($collectStats['failed'] ?? 0);
+		$stats['failed_batches'] = (int) ($collectStats['failed_batches'] ?? 0);
+		$stats['iterations'] = (int) ($collectStats['iterations'] ?? 0);
+		$stats['waiting'] = (int) ($collectStats['waiting'] ?? 0);
+		$stats['batch_statuses'] = $collectStats['batch_statuses'] ?? [];
+
 		$this->emitBatchEvent('batch_finished', $stats);
 
 		return $stats;
@@ -254,6 +284,53 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 		}
 
 		return $proxy;
+	}
+
+	/**
+	 * Проверяет наличие хотя бы одного нового запроса и возвращает iterable,
+	 * который не теряет уже прочитанный первый элемент.
+	 *
+	 * @return array{0: bool, 1: iterable<mixed>}
+	 */
+	private function peekIterable(iterable $items): array
+	{
+		if (is_array($items)) {
+			return [$items !== [], $items];
+		}
+
+		if ($items instanceof \Iterator) {
+			$iterator = $items;
+		} elseif ($items instanceof \IteratorAggregate) {
+			$iterator = $items->getIterator();
+		} else {
+			$iterator = (function () use ($items): \Generator {
+				yield from $items;
+			})();
+		}
+
+		if (!$iterator instanceof \Iterator) {
+			$iterator = (function () use ($iterator): \Generator {
+				yield from $iterator;
+			})();
+		}
+
+		$iterator->rewind();
+		if (!$iterator->valid()) {
+			return [false, []];
+		}
+
+		$first = $iterator->current();
+		$withFirstItem = (function () use ($iterator, $first): \Generator {
+			yield $first;
+			$iterator->next();
+
+			while ($iterator->valid()) {
+				yield $iterator->current();
+				$iterator->next();
+			}
+		})();
+
+		return [true, $withFirstItem];
 	}
 
 	/**
@@ -648,7 +725,7 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 	/**
 	 * @param array<string, mixed> $status
 	 * @param array<string, array<string, mixed>> $requestMap
-	 * @param callable(array<string, mixed>): void $onResult
+	 * @param callable(array<string, mixed>): bool $onResult
 	 * @return array<string, mixed>
 	 */
 	private function collectBatchResults(
@@ -748,15 +825,28 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 
 						$stats['success'] += $resultStats['success'];
 						$stats['failed'] += $resultStats['failed'];
-						$batchData['status'] = 'saved';
-						$batchData['saved_at'] = date(DATE_ATOM);
 						$batchData['saved_results_count'] = $resultStats['success'];
 						$batchData['failed_results_count'] = $resultStats['failed'];
-						$this->emitBatchEvent('chunk_results_saved', [
-							'chunk' => (string) $chunkKey,
-							'success' => $resultStats['success'],
-							'failed' => $resultStats['failed'],
-						]);
+
+						if ($resultStats['failed'] === 0) {
+							$batchData['status'] = 'saved';
+							$batchData['saved_at'] = date(DATE_ATOM);
+							$batchData['last_error'] = null;
+							$this->emitBatchEvent('chunk_results_saved', [
+								'chunk' => (string) $chunkKey,
+								'success' => $resultStats['success'],
+								'failed' => 0,
+							]);
+						} else {
+							$batchData['status'] = 'failed';
+							$batchData['last_error'] = 'Not all Batch results were applied successfully.';
+							$stats['failed_batches']++;
+							$this->emitBatchEvent('chunk_results_incomplete', [
+								'chunk' => (string) $chunkKey,
+								'success' => $resultStats['success'],
+								'failed' => $resultStats['failed'],
+							]);
+						}
 					} elseif (in_array($currentStatus, ['failed', 'expired', 'cancelled'], true)) {
 						$stats['failed_batches']++;
 						$this->saveBatchErrorFile($stateDirectory, (string) $chunkKey, $batchData);
@@ -827,7 +917,7 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 	/**
 	 * @param array<string, mixed> $batchData
 	 * @param array<string, array<string, mixed>> $requestMap
-	 * @param callable(array<string, mixed>): void $onResult
+	 * @param callable(array<string, mixed>): bool $onResult
 	 * @return array{success: int, failed: int}
 	 */
 	private function deliverBatchResults(
@@ -879,18 +969,19 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 
 				if ($statusCode >= 200 && $statusCode < 300 && is_array($body)) {
 					$text = $this->extractGeneratedText($body);
+					$applied = $onResult([
+						'id' => $rowId,
+						'status' => 'success',
+						'content' => $text,
+					]);
 
-					if (trim($text) !== '') {
-						$onResult([
-							'id' => $rowId,
-							'status' => 'success',
-							'content' => $text,
-						]);
+					if ($applied !== false) {
 						$success++;
-						continue;
+					} else {
+						$failed++;
 					}
 
-					$error = 'OpenAI returned an empty Batch result.';
+					continue;
 				}
 
 				$onResult([
@@ -1093,7 +1184,7 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 		if ($requestMap === []) {
 			throw new RuntimeException(
 				'Batch state is inconsistent: an unfinished session exists, but map.json is empty. '
-				. 'Run the command with --force-batch to discard the broken local Batch state.'
+					. 'Run the command with --force-batch to discard the broken local Batch state.'
 			);
 		}
 
@@ -1102,7 +1193,7 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 			if (!is_array($batchData)) {
 				throw new RuntimeException(
 					"Batch state is inconsistent: invalid status for chunk '{$chunkKey}'. "
-					. 'Run the command with --force-batch to discard the broken local Batch state.'
+						. 'Run the command with --force-batch to discard the broken local Batch state.'
 				);
 			}
 
@@ -1110,7 +1201,7 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 			if (!is_string($fileName) || $fileName === '') {
 				throw new RuntimeException(
 					"Batch state is inconsistent: chunk '{$chunkKey}' has no JSONL file name. "
-					. 'Run the command with --force-batch to discard the broken local Batch state.'
+						. 'Run the command with --force-batch to discard the broken local Batch state.'
 				);
 			}
 
@@ -1118,7 +1209,7 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 			if (!is_file($chunkPath)) {
 				throw new RuntimeException(
 					"Batch state is inconsistent: JSONL chunk is missing: {$chunkPath}. "
-					. 'Run the command with --force-batch to discard the broken local Batch state.'
+						. 'Run the command with --force-batch to discard the broken local Batch state.'
 				);
 			}
 
@@ -1130,7 +1221,7 @@ class OpenAILLMGenerator implements BatchLLMGeneratorInterface
 			if (!is_string($customId) || !is_string($chunkKey) || !isset($chunkKeys[$chunkKey])) {
 				throw new RuntimeException(
 					'Batch state is inconsistent: map.json contains an invalid request mapping. '
-					. 'Run the command with --force-batch to discard the broken local Batch state.'
+						. 'Run the command with --force-batch to discard the broken local Batch state.'
 				);
 			}
 		}
