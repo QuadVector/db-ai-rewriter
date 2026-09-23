@@ -1,0 +1,17 @@
+{
+    "data_source": "sqlite",
+    "db_name": "db.sqlite3",
+    "db_username": "",
+    "db_pass": "",
+    "table_name": "tasks",
+    "ai_provider": "openai",
+    "ai_model": "gpt-6-luna",
+    "ai_temperature": 1.0,
+    "ai_max_output_tokens": 8000,
+    "ai_batch": true,
+    "ai_batch_poll_interval_seconds": 60,
+    "ai_batch_max_wait_seconds": 86400,
+    "id_column_name": "id",
+    "update_column_name": "content",
+    "update_column_prompt": "Исправь ошибки в тексте и верни содержимое"
+}
